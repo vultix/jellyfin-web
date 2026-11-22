@@ -15,6 +15,10 @@ export interface StreamInfo {
     playMethod?: PlayMethod
     playSessionId?: string
     playbackStartTimeTicks?: number
+    /** Speed baked into a server-side transcode; positions on the stream are media time / speed. */
+    playbackSpeed?: number
+    /** Speed to apply with native playbackRate after the server declined server-side speed. */
+    fallbackPlaybackRate?: number
     playerStartPositionTicks?: number
     resetSubtitleOffset?: boolean
     started?: boolean

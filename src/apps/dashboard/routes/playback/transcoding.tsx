@@ -32,6 +32,9 @@ import SimpleAlert from 'components/SimpleAlert';
 
 const CONFIG_KEY = 'encoding';
 
+/** EnableServerSidePlaybackSpeed is new in the server; drop this once the SDK models include it. */
+type EncodingConfig = EncodingOptions & { EnableServerSidePlaybackSpeed?: boolean };
+
 export const action = async ({ request }: ActionFunctionArgs) => {
     const api = ServerConnections.getApi();
     if (!api) throw new Error('No Api instance available');
@@ -862,6 +865,20 @@ export const Component = () => {
                                     }
                                 />
                                 <FormHelperText>{globalize.translate('AllowSegmentDeletionHelp')}</FormHelperText>
+                            </FormControl>
+
+                            <FormControl>
+                                <FormControlLabel
+                                    label={globalize.translate('AllowServerSidePlaybackSpeed')}
+                                    control={
+                                        <Checkbox
+                                            name='EnableServerSidePlaybackSpeed'
+                                            checked={!!(config as EncodingConfig).EnableServerSidePlaybackSpeed}
+                                            onChange={onCheckboxChange}
+                                        />
+                                    }
+                                />
+                                <FormHelperText>{globalize.translate('AllowServerSidePlaybackSpeedHelp')}</FormHelperText>
                             </FormControl>
 
                             <TextField
