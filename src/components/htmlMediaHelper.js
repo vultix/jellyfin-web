@@ -365,6 +365,8 @@ export function getBufferedRanges(instance, elem) {
 
     let offset;
     const currentPlayOptions = instance._currentPlayOptions;
+    // Buffered times are on the stream timeline; a server-side sped-up stream runs on media time / speed
+    const speed = currentPlayOptions?.playbackSpeed || 1;
     if (currentPlayOptions) {
         offset = currentPlayOptions.transcodingOffsetTicks;
     }
@@ -385,8 +387,8 @@ export function getBufferedRanges(instance, elem) {
         }
 
         ranges.push({
-            start: (start * 10000000) + offset,
-            end: (end * 10000000) + offset
+            start: (start * 10000000 * speed) + offset,
+            end: (end * 10000000 * speed) + offset
         });
     }
 
