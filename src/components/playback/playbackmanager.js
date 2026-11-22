@@ -1824,9 +1824,15 @@ export class PlaybackManager {
                 streamInfo.started = true;
                 streamInfo.ended = false;
 
-                if (streamInfo.fallbackPlaybackRate && player.setPlaybackRate) {
-                    // The server declined server-side speed; use the native rate instead
-                    player.setPlaybackRate(streamInfo.fallbackPlaybackRate);
+                if (streamInfo.fallbackPlaybackRate) {
+                    // The server declined server-side speed, but this stream was requested as a forced
+                    // transcode with burned-in subtitles. Go back to a normal stream and use the
+                    // native rate on it instead.
+                    playerData.pendingNativePlaybackRate = streamInfo.fallbackPlaybackRate;
+                    changeStream(player, getCurrentTicks(player), {});
+                } else if (playerData.pendingNativePlaybackRate) {
+                    player.setPlaybackRate?.(playerData.pendingNativePlaybackRate);
+                    playerData.pendingNativePlaybackRate = null;
                 }
 
                 sendProgressUpdate(player, 'timeupdate');
@@ -3013,6 +3019,15 @@ export class PlaybackManager {
                             playbackSpeed = serverSpeed;
                             // The player seeks on the sped-up stream's timeline
                             playerStartPositionTicks = startPosition ? startPosition / playbackSpeed : startPosition;
+
+                            // Subtitles are burned in while sped up (client-rendered cues would be on media
+                            // time). Mark every track as Encode so the player doesn't render its own copy and
+                            // toggling/switching tracks requests a new stream.
+                            mediaSource.MediaStreams?.forEach(stream => {
+                                if (stream.Type === 'Subtitle') {
+                                    stream.DeliveryMethod = 'Encode';
+                                }
+                            });
                         }
                     } else {
                         contentType = getMimeType(type.toLowerCase(), mediaSource.TranscodingContainer);
