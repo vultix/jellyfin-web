@@ -1819,19 +1819,28 @@ export class PlaybackManager {
                         getPlayerData(player).audioStreamIndex = audioStreamIndex;
                         getPlayerData(player).maxStreamingBitrate = maxBitrate;
 
-                        changeStreamToUrl(apiClient, player, playSessionId, streamInfo);
+                        changeStreamToUrl(apiClient, player, playSessionId, streamInfo, speedRequestId);
                     }
                 });
             });
         }
 
-        function changeStreamToUrl(apiClient, player, playSessionId, streamInfo) {
+        function changeStreamToUrl(apiClient, player, playSessionId, streamInfo, speedRequestId) {
             const playerData = getPlayerData(player);
 
             playerData.isChangingStream = true;
+            playerData.changingStreamInfo = streamInfo;
 
             if (playerData.streamInfo && playSessionId) {
                 apiClient.stopActiveEncodings(playSessionId).then(function () {
+                    if (playerData.speedRequestId !== speedRequestId) {
+                        // The speed changed again while the old encoding was stopping
+                        if (playerData.changingStreamInfo === streamInfo) {
+                            playerData.isChangingStream = false;
+                        }
+                        return;
+                    }
+
                     // Stop the first transcoding afterwards because the player may still send requests to the original url
                     const afterSetSrc = function () {
                         apiClient.stopActiveEncodings(playSessionId);
@@ -2351,8 +2360,10 @@ export class PlaybackManager {
          */
         self.setServerPlaybackSpeed = function (player, speed) {
             const playerData = getPlayerData(player);
+            if ((playerData.serverPlaybackSpeed || 1) !== speed) {
+                playerData.speedRequestId = (playerData.speedRequestId || 0) + 1;
+            }
             playerData.serverPlaybackSpeed = speed === 1 ? null : speed;
-            playerData.speedRequestId = (playerData.speedRequestId || 0) + 1;
 
             if (!playerData.streamInfo || Math.abs(getStreamPlaybackSpeed(player) - speed) < 0.001) {
                 return;
