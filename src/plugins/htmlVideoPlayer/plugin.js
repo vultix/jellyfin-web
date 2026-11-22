@@ -2145,6 +2145,16 @@ export class HtmlVideoPlayer {
         return false;
     }
 
+    /**
+     * Whether playback speed must be applied by the server (transcoding) instead of the
+     * media element. The webOS media pipeline mutes audio when playbackRate != 1
+     * (jellyfin-web#3314); other platforms keep using native playbackRate.
+     * Set localStorage 'forceServerPlaybackRate' to 'true' to test this path in a desktop browser.
+     */
+    requiresServerPlaybackRate() {
+        return browser.web0s || localStorage.getItem('forceServerPlaybackRate') === 'true';
+    }
+
     setPlaybackRate(value) {
         const mediaElement = this.#mediaElement;
         if (mediaElement) {
