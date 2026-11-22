@@ -1749,10 +1749,7 @@ export class HtmlVideoPlayer {
 
         // This play method can only check if it is real direct play, and will mark Remux as Transcode as well
         const isDirectPlay = this._currentPlayOptions.playMethod === 'DirectPlay';
-        // Server-side sped-up streams always burn in subtitles, since client-rendered cues
-        // would be on media time while the stream runs on media time / speed.
-        const isServerSpeedStream = (this._currentPlayOptions.playbackSpeed || 1) !== 1;
-        const burnInWhenTranscoding = appSettings.alwaysBurnInSubtitleWhenTranscoding() || isServerSpeedStream;
+        const burnInWhenTranscoding = appSettings.alwaysBurnInSubtitleWhenTranscoding();
 
         let sessionPromise;
         if (!isDirectPlay && burnInWhenTranscoding) {

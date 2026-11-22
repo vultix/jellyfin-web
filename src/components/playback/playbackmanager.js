@@ -2994,6 +2994,15 @@ export class PlaybackManager {
                             playbackSpeed = serverSpeed;
                             // The player seeks on the sped-up stream's timeline
                             playerStartPositionTicks = startPosition ? startPosition / playbackSpeed : startPosition;
+
+                            // Subtitles are burned in while sped up (client-rendered cues would be on media
+                            // time). Mark every track as Encode so the player doesn't render its own copy and
+                            // toggling/switching tracks requests a new stream.
+                            mediaSource.MediaStreams?.forEach(stream => {
+                                if (stream.Type === 'Subtitle') {
+                                    stream.DeliveryMethod = 'Encode';
+                                }
+                            });
                         }
                     } else {
                         contentType = getMimeType(type.toLowerCase(), mediaSource.TranscodingContainer);
