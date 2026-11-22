@@ -500,6 +500,11 @@ async function getPlaybackInfo(player, apiClient, item, deviceProfile, mediaSour
     query.AlwaysBurnInSubtitleWhenTranscoding = options.alwaysBurnInSubtitleWhenTranscoding
         || appSettings.alwaysBurnInSubtitleWhenTranscoding();
 
+    if (options.playbackSpeed && options.playbackSpeed !== 1) {
+        // Honored only if the server enables it; it then adds playbackSpeed to the TranscodingUrl
+        query.PlaybackSpeed = options.playbackSpeed;
+    }
+
     query.DeviceProfile = deviceProfile;
 
     const res = await getMediaInfoApi(api).getPostedPlaybackInfo({ itemId: itemId, playbackInfoDto: query });
@@ -1767,13 +1772,15 @@ export class PlaybackManager {
                     enableDirectStream: params.EnableDirectStream,
                     allowVideoStreamCopy: params.AllowVideoStreamCopy,
                     allowAudioStreamCopy: params.AllowAudioStreamCopy,
-                    alwaysBurnInSubtitleWhenTranscoding: params.AlwaysBurnInSubtitleWhenTranscoding
+                    alwaysBurnInSubtitleWhenTranscoding: params.AlwaysBurnInSubtitleWhenTranscoding,
+                    playbackSpeed: getRequestedServerPlaybackSpeed(player)
                 };
 
                 getPlaybackInfo(player, apiClient, currentItem, deviceProfile, currentMediaSource.Id, liveStreamId, options).then(function (result) {
                     if (validatePlaybackInfoResult(self, result)) {
                         // Changing streams requests only the active source; keep the version availability flag.
                         result.MediaSources[0].hasAlternateVersions = currentMediaSource.hasAlternateVersions;
+                        result.MediaSources[0].requestedPlaybackSpeed = options.playbackSpeed;
                         currentMediaSource = result.MediaSources[0];
 
                         const streamInfo = createStreamInfo(apiClient, currentItem.MediaType, currentItem, currentMediaSource, ticks, player);
@@ -1825,6 +1832,11 @@ export class PlaybackManager {
                 playerData.isChangingStream = false;
                 streamInfo.started = true;
                 streamInfo.ended = false;
+
+                if (streamInfo.fallbackPlaybackRate && player.setPlaybackRate) {
+                    // The server declined server-side speed; use the native rate instead
+                    player.setPlaybackRate(streamInfo.fallbackPlaybackRate);
+                }
 
                 sendProgressUpdate(player, 'timeupdate');
             }, function (e) {
@@ -2306,15 +2318,38 @@ export class PlaybackManager {
             return getPlayerData(player).streamInfo?.playbackSpeed || 1;
         }
 
+        // Whether speed changes should go through the server for this player. False once the
+        // server has declined (feature disabled, or an older server), so native playbackRate is used.
+        function usesServerPlaybackSpeed(player) {
+            return !!player?.requiresServerPlaybackRate?.() && !getPlayerData(player).serverPlaybackSpeedDeclined;
+        }
+
+        self.usesServerPlaybackSpeed = usesServerPlaybackSpeed;
+
         // Speed the user asked for on a player that needs the server to apply it.
         function getRequestedServerPlaybackSpeed(player) {
-            return (player?.requiresServerPlaybackRate?.() && getPlayerData(player).serverPlaybackSpeed) || 1;
+            return (usesServerPlaybackSpeed(player) && getPlayerData(player).serverPlaybackSpeed) || 1;
         }
 
         self.getServerPlaybackSpeed = getRequestedServerPlaybackSpeed;
 
+        // If this stream was requested with a server-side speed but the server didn't apply it,
+        // stop asking and return the speed to apply natively instead.
+        function getFallbackPlaybackRate(player, mediaSource, streamSpeed) {
+            const requested = mediaSource.requestedPlaybackSpeed;
+            if (!player || !requested || requested === 1 || streamSpeed !== 1) {
+                return undefined;
+            }
+
+            const playerData = getPlayerData(player);
+            playerData.serverPlaybackSpeedDeclined = true;
+            playerData.serverPlaybackSpeed = null;
+            console.warn('[playbackmanager] server did not apply playback speed; falling back to native playbackRate');
+            return requested;
+        }
+
         /**
-         * Changes speed on players whose native playbackRate loses audio (webOS, Tizen) by
+         * Changes speed on players whose native playbackRate loses audio (webOS) by
          * requesting a new transcode with the speed applied by the server.
          */
         self.setServerPlaybackSpeed = function (player, speed) {
@@ -2953,10 +2988,10 @@ export class PlaybackManager {
                     if (mediaSource.TranscodingSubProtocol === 'hls') {
                         contentType = 'application/x-mpegURL';
 
-                        const requestedSpeed = getRequestedServerPlaybackSpeed(player);
-                        if (requestedSpeed !== 1) {
-                            playbackSpeed = requestedSpeed;
-                            mediaUrl += (mediaUrl.includes('?') ? '&' : '?') + 'PlaybackSpeed=' + playbackSpeed;
+                        // The server adds playbackSpeed to the TranscodingUrl when it applies the speed
+                        const serverSpeed = Number.parseFloat(/[?&]playbackSpeed=([\d.]+)/i.exec(mediaUrl)?.[1]);
+                        if (serverSpeed > 0 && serverSpeed !== 1) {
+                            playbackSpeed = serverSpeed;
                             // The player seeks on the sped-up stream's timeline
                             playerStartPositionTicks = startPosition ? startPosition / playbackSpeed : startPosition;
                         }
@@ -2987,6 +3022,7 @@ export class PlaybackManager {
                 playMethod: playMethod,
                 playerStartPositionTicks: playerStartPositionTicks,
                 playbackSpeed: playbackSpeed,
+                fallbackPlaybackRate: getFallbackPlaybackRate(player, mediaSource, playbackSpeed),
                 item: item,
                 mediaSource: mediaSource,
                 textTracks: getTextTracks(apiClient, item, mediaSource),
@@ -4173,7 +4209,7 @@ export class PlaybackManager {
     }
 
     setPlaybackRate(value, player = this._currentPlayer) {
-        if (player?.requiresServerPlaybackRate?.()) {
+        if (player && this.usesServerPlaybackSpeed(player)) {
             const speed = Number.parseFloat(value);
             if (Number.isFinite(speed) && speed >= 0.5 && speed <= 4) {
                 this.setServerPlaybackSpeed(player, speed);
@@ -4191,7 +4227,7 @@ export class PlaybackManager {
     }
 
     getPlaybackRate(player = this._currentPlayer) {
-        if (player?.requiresServerPlaybackRate?.()) {
+        if (player && this.usesServerPlaybackSpeed(player)) {
             return this.getServerPlaybackSpeed(player);
         }
 
