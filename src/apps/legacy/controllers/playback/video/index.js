@@ -1612,7 +1612,8 @@ export default function (view) {
         // Restore playback speed control, if it exists in the session.
         const playbackRateSpeed = sessionStorage.getItem('playbackRateSpeed');
         if (playbackRateSpeed !== null) {
-            player.setPlaybackRate(playbackRateSpeed);
+            // Through playbackManager so players needing server-side speed (webOS/Tizen) get it
+            playbackManager.setPlaybackRate(playbackRateSpeed, player);
         }
     }
 

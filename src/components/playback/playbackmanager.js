@@ -497,7 +497,8 @@ async function getPlaybackInfo(player, apiClient, item, deviceProfile, mediaSour
         query.DirectPlayProtocols = player.getDirectPlayProtocols();
     }
 
-    query.AlwaysBurnInSubtitleWhenTranscoding = appSettings.alwaysBurnInSubtitleWhenTranscoding();
+    query.AlwaysBurnInSubtitleWhenTranscoding = options.alwaysBurnInSubtitleWhenTranscoding
+        || appSettings.alwaysBurnInSubtitleWhenTranscoding();
 
     query.DeviceProfile = deviceProfile;
 
@@ -1711,11 +1712,25 @@ export class PlaybackManager {
 
         function changeStream(player, ticks, params) {
             if (canPlayerSeek(player) && params == null) {
-                player.currentTime(parseInt(ticks / 10000, 10));
+                // ticks are media time; a server-side sped-up stream runs on media time / speed
+                player.currentTime(parseInt(ticks / 10000 / getStreamPlaybackSpeed(player), 10));
                 return;
             }
 
             params = params || {};
+
+            if (getRequestedServerPlaybackSpeed(player) !== 1) {
+                // Keep the speed across stream changes (audio/subtitle/quality): it needs a full
+                // transcode, and text subtitles are burned in so they follow the stream timeline.
+                params = {
+                    ...params,
+                    EnableDirectPlay: false,
+                    EnableDirectStream: false,
+                    AllowVideoStreamCopy: false,
+                    AllowAudioStreamCopy: false,
+                    AlwaysBurnInSubtitleWhenTranscoding: true
+                };
+            }
 
             const liveStreamId = getPlayerData(player).streamInfo.liveStreamId;
             const lastMediaInfoQuery = getPlayerData(player).streamInfo.lastMediaInfoQuery;
@@ -1751,7 +1766,8 @@ export class PlaybackManager {
                     enableDirectPlay: params.EnableDirectPlay,
                     enableDirectStream: params.EnableDirectStream,
                     allowVideoStreamCopy: params.AllowVideoStreamCopy,
-                    allowAudioStreamCopy: params.AllowAudioStreamCopy
+                    allowAudioStreamCopy: params.AllowAudioStreamCopy,
+                    alwaysBurnInSubtitleWhenTranscoding: params.AlwaysBurnInSubtitleWhenTranscoding
                 };
 
                 getPlaybackInfo(player, apiClient, currentItem, deviceProfile, currentMediaSource.Id, liveStreamId, options).then(function (result) {
@@ -2274,7 +2290,8 @@ export class PlaybackManager {
                 throw new Error('player cannot be null');
             }
 
-            let playerTime = Math.floor(10000 * (player).currentTime());
+            // Convert the stream position to media time (they differ for server-side sped-up streams)
+            let playerTime = Math.floor(10000 * (player).currentTime() * getStreamPlaybackSpeed(player));
 
             const streamInfo = getPlayerData(player).streamInfo;
             if (streamInfo) {
@@ -2283,6 +2300,34 @@ export class PlaybackManager {
 
             return playerTime;
         }
+
+        // Speed baked into the stream that is currently loaded (1 for normal streams).
+        function getStreamPlaybackSpeed(player) {
+            return getPlayerData(player).streamInfo?.playbackSpeed || 1;
+        }
+
+        // Speed the user asked for on a player that needs the server to apply it.
+        function getRequestedServerPlaybackSpeed(player) {
+            return (player?.requiresServerPlaybackRate?.() && getPlayerData(player).serverPlaybackSpeed) || 1;
+        }
+
+        self.getServerPlaybackSpeed = getRequestedServerPlaybackSpeed;
+
+        /**
+         * Changes speed on players whose native playbackRate loses audio (webOS, Tizen) by
+         * requesting a new transcode with the speed applied by the server.
+         */
+        self.setServerPlaybackSpeed = function (player, speed) {
+            const playerData = getPlayerData(player);
+            playerData.serverPlaybackSpeed = speed === 1 ? null : speed;
+
+            if (!playerData.streamInfo || Math.abs(getStreamPlaybackSpeed(player) - speed) < 0.001) {
+                return;
+            }
+
+            // getCurrentTicks still uses the old stream's speed here, so this is the right media position
+            changeStream(player, getCurrentTicks(player), {});
+        };
 
         // Only used internally
         self.getCurrentTicks = getCurrentTicks;
@@ -2854,7 +2899,8 @@ export class PlaybackManager {
             let mediaUrl;
             let contentType;
             let transcodingOffsetTicks = 0;
-            const playerStartPositionTicks = startPosition;
+            let playerStartPositionTicks = startPosition;
+            let playbackSpeed = 1;
             const liveStreamId = mediaSource.LiveStreamId;
 
             let playMethod = 'Transcode';
@@ -2906,6 +2952,14 @@ export class PlaybackManager {
 
                     if (mediaSource.TranscodingSubProtocol === 'hls') {
                         contentType = 'application/x-mpegURL';
+
+                        const requestedSpeed = getRequestedServerPlaybackSpeed(player);
+                        if (requestedSpeed !== 1) {
+                            playbackSpeed = requestedSpeed;
+                            mediaUrl += (mediaUrl.includes('?') ? '&' : '?') + 'PlaybackSpeed=' + playbackSpeed;
+                            // The player seeks on the sped-up stream's timeline
+                            playerStartPositionTicks = startPosition ? startPosition / playbackSpeed : startPosition;
+                        }
                     } else {
                         contentType = getMimeType(type.toLowerCase(), mediaSource.TranscodingContainer);
 
@@ -2932,6 +2986,7 @@ export class PlaybackManager {
                 transcodingOffsetTicks: transcodingOffsetTicks,
                 playMethod: playMethod,
                 playerStartPositionTicks: playerStartPositionTicks,
+                playbackSpeed: playbackSpeed,
                 item: item,
                 mediaSource: mediaSource,
                 textTracks: getTextTracks(apiClient, item, mediaSource),
@@ -4118,6 +4173,15 @@ export class PlaybackManager {
     }
 
     setPlaybackRate(value, player = this._currentPlayer) {
+        if (player?.requiresServerPlaybackRate?.()) {
+            const speed = Number.parseFloat(value);
+            if (Number.isFinite(speed) && speed >= 0.5 && speed <= 4) {
+                this.setServerPlaybackSpeed(player, speed);
+                sessionStorage.setItem('playbackRateSpeed', value);
+            }
+            return;
+        }
+
         if (player?.setPlaybackRate) {
             player.setPlaybackRate(value);
 
@@ -4127,6 +4191,10 @@ export class PlaybackManager {
     }
 
     getPlaybackRate(player = this._currentPlayer) {
+        if (player?.requiresServerPlaybackRate?.()) {
+            return this.getServerPlaybackSpeed(player);
+        }
+
         if (player?.getPlaybackRate) {
             return player.getPlaybackRate();
         }

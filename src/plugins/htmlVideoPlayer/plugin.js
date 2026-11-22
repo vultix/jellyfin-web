@@ -1749,7 +1749,10 @@ export class HtmlVideoPlayer {
 
         // This play method can only check if it is real direct play, and will mark Remux as Transcode as well
         const isDirectPlay = this._currentPlayOptions.playMethod === 'DirectPlay';
-        const burnInWhenTranscoding = appSettings.alwaysBurnInSubtitleWhenTranscoding();
+        // Server-side sped-up streams always burn in subtitles, since client-rendered cues
+        // would be on media time while the stream runs on media time / speed.
+        const isServerSpeedStream = (this._currentPlayOptions.playbackSpeed || 1) !== 1;
+        const burnInWhenTranscoding = appSettings.alwaysBurnInSubtitleWhenTranscoding() || isServerSpeedStream;
 
         let sessionPromise;
         if (!isDirectPlay && burnInWhenTranscoding) {
@@ -2166,6 +2169,15 @@ export class HtmlVideoPlayer {
         }
 
         return false;
+    }
+
+    /**
+     * Whether playback speed must be applied by the server (transcoding) instead of the
+     * media element. webOS and Tizen mute audio when playbackRate != 1.
+     * Set localStorage 'forceServerPlaybackRate' to 'true' to test this path in a desktop browser.
+     */
+    requiresServerPlaybackRate() {
+        return browser.web0s || browser.tizen || localStorage.getItem('forceServerPlaybackRate') === 'true';
     }
 
     setPlaybackRate(value) {

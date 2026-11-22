@@ -15,6 +15,8 @@ export interface StreamInfo {
     playMethod?: PlayMethod
     playSessionId?: string
     playbackStartTimeTicks?: number
+    /** Speed baked into a server-side transcode; positions on the stream are media time / speed. */
+    playbackSpeed?: number
     playerStartPositionTicks?: number
     resetSubtitleOffset?: boolean
     started?: boolean
