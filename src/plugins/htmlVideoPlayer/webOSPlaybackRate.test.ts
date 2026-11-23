@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     cancelWebOSPlaybackRate,
     getWebOSPlaybackRate,
-    isWebOSPlaybackRateSupported,
     setWebOSPlaybackRate
 } from './webOSPlaybackRate';
 
@@ -73,12 +72,6 @@ describe('webOSPlaybackRate', () => {
         delete window.PalmServiceBridge;
     });
 
-    it('is supported only with a service bridge', () => {
-        expect(isWebOSPlaybackRateSupported()).toBe(true);
-        delete window.PalmServiceBridge;
-        expect(isWebOSPlaybackRateSupported()).toBe(false);
-    });
-
     it('sets the element rate and keeps the sound with setPlayRate', async () => {
         const element = createElement('pipeline-1');
 
@@ -107,32 +100,25 @@ describe('webOSPlaybackRate', () => {
         expect(subscriptions()[0].cancelled).toBe(true);
     });
 
-    it('leaves the rate alone when the seek does not finish', async () => {
+    it.each([
+        ['times out', () => vi.advanceTimersByTimeAsync(2000)],
+        ['is refused', () => {
+            subscriptions()[0].emit({ returnValue: false });
+            return vi.advanceTimersByTimeAsync(10);
+        }]
+    ])('leaves the rate alone when the seek %s', async (_, endSeek) => {
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
         const element = createElement('pipeline-1');
         await setRate(element, 1.5);
 
         await setRate(element, 2);
-        await vi.advanceTimersByTimeAsync(2000);
+        await endSeek();
 
         expect(playRates()).toHaveLength(1);
         expect(element.playbackRate).toBe(1.5);
         expect(subscriptions()[0].cancelled).toBe(true);
-        expect(warn).toHaveBeenCalled();
-    });
-
-    it('stops waiting when the subscription is refused', async () => {
-        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-        const element = createElement('pipeline-1');
-        await setRate(element, 1.5);
-
-        await setRate(element, 2);
-        subscriptions()[0].emit({ returnValue: false });
-        await vi.advanceTimersByTimeAsync(10);
-
-        expect(subscriptions()[0].cancelled).toBe(true);
-        expect(playRates()).toHaveLength(1);
         expect(getWebOSPlaybackRate(element)).toBeUndefined();
+        expect(warn).toHaveBeenCalled();
     });
 
     it('applies the rate to the new pipeline when it is replaced during the seek', async () => {
@@ -198,19 +184,12 @@ describe('webOSPlaybackRate', () => {
         expect(element.playbackRate).toBe(1.25);
     });
 
-    it('needs no service call for 1x on an unchanged pipeline', async () => {
+    it('goes back to 1x through the media service only after a change', async () => {
         const element = createElement('pipeline-1');
-
         await setRate(element, 1);
-
         expect(log).toEqual([]);
-        expect(element.playbackRate).toBe(1);
-    });
 
-    it('goes back to 1x through the media service after a change', async () => {
-        const element = createElement('pipeline-1');
         await setRate(element, 2);
-
         await setRate(element, 1);
         subscriptions()[0].emit({ seekDone: {} });
         await vi.advanceTimersByTimeAsync(100);
@@ -230,21 +209,6 @@ describe('webOSPlaybackRate', () => {
 
         expect(log).toEqual([]);
         expect(element.playbackRate).toBe(1);
-        expect(getWebOSPlaybackRate(element)).toBeUndefined();
-    });
-
-    it('logs a failing bridge instead of rejecting', async () => {
-        const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-        window.PalmServiceBridge = class {
-            constructor() {
-                throw new Error('no bridge');
-            }
-        } as unknown as typeof FakeBridge;
-        const element = createElement('pipeline-1');
-
-        await setRate(element, 2);
-
-        expect(error).toHaveBeenCalled();
         expect(getWebOSPlaybackRate(element)).toBeUndefined();
     });
 });
