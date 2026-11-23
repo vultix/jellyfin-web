@@ -43,6 +43,7 @@ import { setBackdropTransparency, TRANSPARENCY_LEVEL } from '../../components/ba
 import Events from '../../utils/events.ts';
 import { includesAny } from '../../utils/container.ts';
 import { isHls } from '../../utils/mediaSource.ts';
+import { getWebOSPlaybackRate, isWebOSPlaybackRateSupported, setWebOSPlaybackRate } from './webOSPlaybackRate';
 
 const NATIVE_UNSUPPORTED_SUBTITLE_CODECS = ['ssa', 'ass', 'pgssub', 'dvdsub', 'vobsub'];
 const ASS_SUBTITLE_CODECS = ['ssa', 'ass'];
@@ -2148,14 +2149,18 @@ export class HtmlVideoPlayer {
     setPlaybackRate(value) {
         const mediaElement = this.#mediaElement;
         if (mediaElement) {
-            mediaElement.playbackRate = value;
+            if (browser.web0s && isWebOSPlaybackRateSupported()) {
+                setWebOSPlaybackRate(mediaElement, value);
+            } else {
+                mediaElement.playbackRate = value;
+            }
         }
     }
 
     getPlaybackRate() {
         const mediaElement = this.#mediaElement;
         if (mediaElement) {
-            return mediaElement.playbackRate;
+            return getWebOSPlaybackRate(mediaElement) ?? mediaElement.playbackRate;
         }
         return null;
     }
