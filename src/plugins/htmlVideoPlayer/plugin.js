@@ -43,7 +43,7 @@ import { setBackdropTransparency, TRANSPARENCY_LEVEL } from '../../components/ba
 import Events from '../../utils/events.ts';
 import { includesAny } from '../../utils/container.ts';
 import { isHls } from '../../utils/mediaSource.ts';
-import { getWebOSPlaybackRate, isWebOSPlaybackRateSupported, setWebOSPlaybackRate } from './webOSPlaybackRate';
+import { cancelWebOSPlaybackRate, getWebOSPlaybackRate, isWebOSPlaybackRateSupported, setWebOSPlaybackRate } from './webOSPlaybackRate';
 
 const NATIVE_UNSUPPORTED_SUBTITLE_CODECS = ['ssa', 'ass', 'pgssub', 'dvdsub', 'vobsub'];
 const ASS_SUBTITLE_CODECS = ['ssa', 'ass'];
@@ -946,6 +946,7 @@ export class HtmlVideoPlayer {
                 elem.pause();
             }
 
+            cancelWebOSPlaybackRate(elem);
             onEndedInternal(this, elem, this.onError);
         }
 
@@ -972,6 +973,7 @@ export class HtmlVideoPlayer {
         if (videoElement) {
             this.#mediaElement = null;
 
+            cancelWebOSPlaybackRate(videoElement);
             this.destroyCustomTrack(videoElement);
             videoElement.removeEventListener('timeupdate', this.onTimeUpdate);
             videoElement.removeEventListener('ended', this.onEnded);

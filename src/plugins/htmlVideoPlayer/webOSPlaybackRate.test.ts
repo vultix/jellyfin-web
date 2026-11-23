@@ -1,29 +1,46 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { getWebOSPlaybackRate, isWebOSPlaybackRateSupported, setWebOSPlaybackRate } from './webOSPlaybackRate';
+import {
+    cancelWebOSPlaybackRate,
+    getWebOSPlaybackRate,
+    isWebOSPlaybackRateSupported,
+    setWebOSPlaybackRate
+} from './webOSPlaybackRate';
 
-/** What happened, in order: service calls and seeks */
+/** Service calls and seeks, in order */
 let log: string[];
-let setPlayRateParams: object[];
+let bridges: FakeBridge[];
 
 class FakeBridge {
     onservicecallback: ((message: string) => void) | null = null;
+    method = '';
+    params: Record<string, unknown> = {};
+    cancelled = false;
+
+    constructor() {
+        bridges.push(this);
+    }
 
     call(uri: string, params: string) {
-        const method = uri.split('/').pop();
-        log.push(method ?? uri);
-        const reply = (message: object) => setTimeout(() => this.onservicecallback?.(JSON.stringify(message)), 10);
-        if (method === 'setPlayRate') {
-            setPlayRateParams.push(JSON.parse(params));
-            reply({ returnValue: true });
-        } else if (method === 'subscribe') {
-            reply({ subscription: true });
-            reply({ seekDone: { mediaId: JSON.parse(params).mediaId } });
+        this.method = uri.split('/').pop() ?? uri;
+        this.params = JSON.parse(params);
+        log.push(this.method);
+        if (this.method === 'setPlayRate') {
+            setTimeout(() => this.emit({ returnValue: true }), 10);
         }
     }
 
-    cancel() { /* nothing to cancel */ }
+    cancel() {
+        this.cancelled = true;
+    }
+
+    emit(message: object) {
+        this.onservicecallback?.(JSON.stringify(message));
+    }
 }
+
+const subscriptions = () => bridges.filter(bridge => bridge.method === 'subscribe');
+const playRates = () => bridges.filter(bridge => bridge.method === 'setPlayRate').map(bridge => bridge.params);
 
 function createElement(mediaId?: string) {
     let position = 42;
@@ -38,11 +55,16 @@ function createElement(mediaId?: string) {
     } as unknown as HTMLMediaElement;
 }
 
+async function setRate(element: HTMLMediaElement, rate: number) {
+    setWebOSPlaybackRate(element, rate);
+    await vi.advanceTimersByTimeAsync(100);
+}
+
 describe('webOSPlaybackRate', () => {
     beforeEach(() => {
         vi.useFakeTimers();
         log = [];
-        setPlayRateParams = [];
+        bridges = [];
         window.PalmServiceBridge = FakeBridge;
     });
 
@@ -60,39 +82,79 @@ describe('webOSPlaybackRate', () => {
     it('sets the element rate and keeps the sound with setPlayRate', async () => {
         const element = createElement('pipeline-1');
 
-        const done = setWebOSPlaybackRate(element, 1.5);
-        await vi.runAllTimersAsync();
-        await done;
+        await setRate(element, 1.5);
 
         expect(element.playbackRate).toBe(1.5);
         expect(log).toEqual(['setPlayRate']);
-        expect(setPlayRateParams).toEqual([{ mediaId: 'pipeline-1', playRate: 1.5, audioOutput: true }]);
+        expect(playRates()).toEqual([{ mediaId: 'pipeline-1', playRate: 1.5, audioOutput: true }]);
+        expect(getWebOSPlaybackRate(element)).toBeUndefined();
     });
 
-    it('seeks in place before changing the rate of the same pipeline again', async () => {
+    it('waits for an in-place seek before changing the same pipeline again', async () => {
         const element = createElement('pipeline-1');
+        await setRate(element, 1.5);
 
-        const first = setWebOSPlaybackRate(element, 1.5);
-        await vi.runAllTimersAsync();
-        await first;
-        const second = setWebOSPlaybackRate(element, 2);
-        await vi.runAllTimersAsync();
-        await second;
+        await setRate(element, 2);
+        expect(log).toEqual(['setPlayRate', 'subscribe', 'seek 42']);
+        expect(element.playbackRate).toBe(1.5);
+        expect(getWebOSPlaybackRate(element)).toBe(2);
+
+        subscriptions()[0].emit({ seekDone: { mediaId: 'pipeline-1' } });
+        await vi.advanceTimersByTimeAsync(100);
 
         expect(log).toEqual(['setPlayRate', 'subscribe', 'seek 42', 'setPlayRate']);
+        expect(element.playbackRate).toBe(2);
+        expect(subscriptions()[0].cancelled).toBe(true);
+    });
+
+    it('leaves the rate alone when the seek does not finish', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const element = createElement('pipeline-1');
+        await setRate(element, 1.5);
+
+        await setRate(element, 2);
+        await vi.advanceTimersByTimeAsync(2000);
+
+        expect(playRates()).toHaveLength(1);
+        expect(element.playbackRate).toBe(1.5);
+        expect(subscriptions()[0].cancelled).toBe(true);
+        expect(warn).toHaveBeenCalled();
+    });
+
+    it('stops waiting when the subscription is refused', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const element = createElement('pipeline-1');
+        await setRate(element, 1.5);
+
+        await setRate(element, 2);
+        subscriptions()[0].emit({ returnValue: false });
+        await vi.advanceTimersByTimeAsync(10);
+
+        expect(subscriptions()[0].cancelled).toBe(true);
+        expect(playRates()).toHaveLength(1);
+        expect(getWebOSPlaybackRate(element)).toBeUndefined();
+    });
+
+    it('applies the rate to the new pipeline when it is replaced during the seek', async () => {
+        const element = createElement('pipeline-1');
+        await setRate(element, 1.5);
+
+        await setRate(element, 2);
+        element.mediaId = 'pipeline-2';
+        subscriptions()[0].emit({ seekDone: { mediaId: 'pipeline-1' } });
+        await vi.advanceTimersByTimeAsync(100);
+
+        expect(playRates()[1]).toEqual({ mediaId: 'pipeline-2', playRate: 2, audioOutput: true });
+        expect(subscriptions()).toHaveLength(1);
         expect(element.playbackRate).toBe(2);
     });
 
     it('does not seek on a new pipeline', async () => {
         const element = createElement('pipeline-1');
+        await setRate(element, 1.5);
 
-        const first = setWebOSPlaybackRate(element, 1.5);
-        await vi.runAllTimersAsync();
-        await first;
         element.mediaId = 'pipeline-2';
-        const second = setWebOSPlaybackRate(element, 1.5);
-        await vi.runAllTimersAsync();
-        await second;
+        await setRate(element, 1.5);
 
         expect(log).toEqual(['setPlayRate', 'setPlayRate']);
     });
@@ -100,48 +162,46 @@ describe('webOSPlaybackRate', () => {
     it('waits for the pipeline to start', async () => {
         const element = createElement();
 
-        const done = setWebOSPlaybackRate(element, 2);
+        setWebOSPlaybackRate(element, 2);
         await vi.advanceTimersByTimeAsync(1000);
         element.mediaId = 'pipeline-1';
-        await vi.runAllTimersAsync();
-        await done;
+        await vi.advanceTimersByTimeAsync(500);
 
-        expect(setPlayRateParams).toEqual([{ mediaId: 'pipeline-1', playRate: 2, audioOutput: true }]);
+        expect(playRates()).toEqual([{ mediaId: 'pipeline-1', playRate: 2, audioOutput: true }]);
     });
 
-    it('falls back to the element rate when the pipeline never starts', async () => {
+    it('falls back to the element rate within the timeout, however many changes were queued', async () => {
         const element = createElement();
 
-        const done = setWebOSPlaybackRate(element, 2);
-        await vi.runAllTimersAsync();
-        await done;
+        setWebOSPlaybackRate(element, 1.25);
+        await vi.advanceTimersByTimeAsync(1000);
+        setWebOSPlaybackRate(element, 1.5);
+        setWebOSPlaybackRate(element, 2);
+        await vi.advanceTimersByTimeAsync(10_500);
 
         expect(element.playbackRate).toBe(2);
         expect(log).toEqual([]);
     });
 
-    it('applies only the latest of several quick changes', async () => {
-        const element = createElement();
+    it('applies only the latest of several changes made during a seek', async () => {
+        const element = createElement('pipeline-1');
+        await setRate(element, 1.5);
 
-        const first = setWebOSPlaybackRate(element, 1.25);
-        const second = setWebOSPlaybackRate(element, 1.5);
-        const third = setWebOSPlaybackRate(element, 2);
-        expect(getWebOSPlaybackRate(element)).toBe(2);
-        element.mediaId = 'pipeline-1';
-        await vi.runAllTimersAsync();
-        await Promise.all([first, second, third]);
+        await setRate(element, 2);
+        await setRate(element, 1.25);
+        subscriptions()[0].emit({ seekDone: {} });
+        await vi.advanceTimersByTimeAsync(100);
+        subscriptions()[1].emit({ seekDone: {} });
+        await vi.advanceTimersByTimeAsync(100);
 
-        expect(setPlayRateParams).toEqual([{ mediaId: 'pipeline-1', playRate: 2, audioOutput: true }]);
-        expect(element.playbackRate).toBe(2);
-        expect(getWebOSPlaybackRate(element)).toBeUndefined();
+        expect(playRates().map(params => params.playRate)).toEqual([1.5, 1.25]);
+        expect(element.playbackRate).toBe(1.25);
     });
 
     it('needs no service call for 1x on an unchanged pipeline', async () => {
         const element = createElement('pipeline-1');
 
-        const done = setWebOSPlaybackRate(element, 1);
-        await vi.runAllTimersAsync();
-        await done;
+        await setRate(element, 1);
 
         expect(log).toEqual([]);
         expect(element.playbackRate).toBe(1);
@@ -149,15 +209,42 @@ describe('webOSPlaybackRate', () => {
 
     it('goes back to 1x through the media service after a change', async () => {
         const element = createElement('pipeline-1');
+        await setRate(element, 2);
 
-        const first = setWebOSPlaybackRate(element, 2);
-        await vi.runAllTimersAsync();
-        await first;
-        const second = setWebOSPlaybackRate(element, 1);
-        await vi.runAllTimersAsync();
-        await second;
+        await setRate(element, 1);
+        subscriptions()[0].emit({ seekDone: {} });
+        await vi.advanceTimersByTimeAsync(100);
 
-        expect(log).toEqual(['setPlayRate', 'subscribe', 'seek 42', 'setPlayRate']);
-        expect(setPlayRateParams[1]).toEqual({ mediaId: 'pipeline-1', playRate: 1, audioOutput: true });
+        expect(playRates()[1]).toEqual({ mediaId: 'pipeline-1', playRate: 1, audioOutput: true });
+        expect(element.playbackRate).toBe(1);
+    });
+
+    it('drops a pending change when cancelled', async () => {
+        const element = createElement();
+
+        setWebOSPlaybackRate(element, 2);
+        await vi.advanceTimersByTimeAsync(500);
+        cancelWebOSPlaybackRate(element);
+        element.mediaId = 'pipeline-1';
+        await vi.advanceTimersByTimeAsync(11_000);
+
+        expect(log).toEqual([]);
+        expect(element.playbackRate).toBe(1);
+        expect(getWebOSPlaybackRate(element)).toBeUndefined();
+    });
+
+    it('logs a failing bridge instead of rejecting', async () => {
+        const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        window.PalmServiceBridge = class {
+            constructor() {
+                throw new Error('no bridge');
+            }
+        } as unknown as typeof FakeBridge;
+        const element = createElement('pipeline-1');
+
+        await setRate(element, 2);
+
+        expect(error).toHaveBeenCalled();
+        expect(getWebOSPlaybackRate(element)).toBeUndefined();
     });
 });

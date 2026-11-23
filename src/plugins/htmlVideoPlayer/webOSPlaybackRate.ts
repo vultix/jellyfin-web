@@ -1,5 +1,3 @@
-// Playback speed on webOS.
-//
 // Changing only the element's playbackRate makes the webOS media pipeline mute the
 // sound. Following it with the media service's setPlayRate (audioOutput: true)
 // keeps the sound on. A pipeline accepts this once; a later change is ignored
@@ -26,20 +24,23 @@ declare global {
     }
 }
 
+interface State {
+    rate: number;
+    /** A rate was requested that the runner has not picked up yet */
+    pending: boolean;
+    running: boolean;
+    /** The pipeline whose rate was changed last */
+    changedMediaId?: string;
+}
+
 const MEDIA_SERVICE = 'luna://com.webos.media/';
 const CALL_TIMEOUT_MS = 5000;
 const SEEK_TIMEOUT_MS = 2000;
+// The mediaId appears a few seconds after a new source starts loading
 const MEDIA_ID_TIMEOUT_MS = 10000;
 const MEDIA_ID_POLL_MS = 250;
 
-/** Rate of a change still being applied, per element */
-const pendingRates = new WeakMap<HTMLMediaElement, number>();
-/** Request counter per element, so a superseded change stops early */
-const requestIds = new WeakMap<HTMLMediaElement, number>();
-/** Changes run one at a time per element */
-const queues = new WeakMap<HTMLMediaElement, Promise<void>>();
-/** mediaId of the pipeline whose rate was last changed, per element */
-const changedPipelines = new WeakMap<HTMLMediaElement, string>();
+const states = new WeakMap<HTMLMediaElement, State>();
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -47,33 +48,8 @@ export function isWebOSPlaybackRateSupported(): boolean {
     return typeof window.PalmServiceBridge === 'function';
 }
 
-function callService(method: string, params: object): Promise<ServiceReply> {
-    return new Promise(resolve => {
-        const Bridge = window.PalmServiceBridge;
-        if (!Bridge) {
-            resolve({ returnValue: false });
-            return;
-        }
-        const bridge = new Bridge();
-        const timer = setTimeout(() => finish({ returnValue: false }), CALL_TIMEOUT_MS);
-        function finish(reply: ServiceReply) {
-            clearTimeout(timer);
-            bridge.onservicecallback = null;
-            resolve(reply);
-        }
-        bridge.onservicecallback = message => {
-            try {
-                finish(JSON.parse(message));
-            } catch {
-                finish({ returnValue: false });
-            }
-        };
-        bridge.call(MEDIA_SERVICE + method, JSON.stringify(params));
-    });
-}
-
-/** Resolves once the pipeline reports a finished seek, or false after a timeout */
-function watchSeekDone(mediaId: string): Promise<boolean> {
+/** Calls a media service method; `onReply` returns true once it has the reply it needs. */
+function callService(method: string, params: object, timeoutMs: number, onReply: (reply: ServiceReply) => boolean): Promise<boolean> {
     return new Promise(resolve => {
         const Bridge = window.PalmServiceBridge;
         if (!Bridge) {
@@ -81,83 +57,111 @@ function watchSeekDone(mediaId: string): Promise<boolean> {
             return;
         }
         const bridge = new Bridge();
-        const timer = setTimeout(() => finish(false), SEEK_TIMEOUT_MS);
-        function finish(done: boolean) {
+        const timer = setTimeout(() => finish(false), timeoutMs);
+        function finish(result: boolean) {
             clearTimeout(timer);
             bridge.onservicecallback = null;
             bridge.cancel();
-            resolve(done);
+            resolve(result);
         }
         bridge.onservicecallback = message => {
+            let reply: ServiceReply;
             try {
-                if ((JSON.parse(message) as ServiceReply).seekDone) finish(true);
+                reply = JSON.parse(message);
             } catch {
-                // ignore unparsable events
+                return;
             }
+            if (reply.returnValue === false) finish(false);
+            else if (onReply(reply)) finish(true);
         };
-        bridge.call(MEDIA_SERVICE + 'subscribe', JSON.stringify({ mediaId, subscribe: true }));
+        bridge.call(MEDIA_SERVICE + method, JSON.stringify(params));
     });
 }
 
-/** The mediaId appears a few seconds after a new source starts loading */
-async function waitForMediaId(element: HTMLMediaElement): Promise<string | undefined> {
-    for (let waited = 0; !element.mediaId && waited < MEDIA_ID_TIMEOUT_MS; waited += MEDIA_ID_POLL_MS) {
-        await sleep(MEDIA_ID_POLL_MS);
-    }
-    return element.mediaId;
+function seekInPlace(element: HTMLMediaElement, mediaId: string): Promise<boolean> {
+    const seekDone = callService('subscribe', { mediaId, subscribe: true }, SEEK_TIMEOUT_MS, reply => Boolean(reply.seekDone));
+    const position = element.currentTime;
+    element.currentTime = position;
+    return seekDone;
 }
 
-async function applyRate(element: HTMLMediaElement, rate: number, requestId: number) {
-    const isCurrent = () => requestIds.get(element) === requestId;
+async function applyRate(element: HTMLMediaElement, state: State, rate: number) {
+    // A newer request, or the player stopping, ends this one
+    const superseded = () => state.pending || states.get(element) !== state;
 
-    const mediaId = await waitForMediaId(element);
-    if (!isCurrent()) return;
+    for (let waited = 0; !element.mediaId && waited < MEDIA_ID_TIMEOUT_MS && !superseded(); waited += MEDIA_ID_POLL_MS) {
+        await sleep(MEDIA_ID_POLL_MS);
+    }
+    if (superseded()) return;
+
+    const mediaId = element.mediaId;
     if (!mediaId) {
         // Speeds up, but silently
         element.playbackRate = rate;
         return;
     }
 
-    const changed = changedPipelines.get(element) === mediaId;
+    const changed = state.changedMediaId === mediaId;
     if (!changed && rate === 1) {
         element.playbackRate = 1;
         return;
     }
 
     if (changed) {
-        const seekDone = watchSeekDone(mediaId);
-        const position = element.currentTime;
-        element.currentTime = position;
-        await seekDone;
-        if (!isCurrent()) return;
+        const seeked = await seekInPlace(element, mediaId);
+        if (superseded()) return;
+        if (element.mediaId !== mediaId) {
+            // The pipeline was replaced during the seek: start over on the new one
+            state.pending = true;
+            return;
+        }
+        if (!seeked) {
+            console.warn('[webOSPlaybackRate] seek did not finish, playback rate not changed');
+            return;
+        }
     }
 
     element.playbackRate = rate;
-    const reply = await callService('setPlayRate', { mediaId, playRate: rate, audioOutput: true });
-    changedPipelines.set(element, mediaId);
-    if (!reply.returnValue) {
-        console.warn('[webOSPlaybackRate] setPlayRate failed, playback may be muted', reply);
+    state.changedMediaId = mediaId;
+    const ok = await callService('setPlayRate', { mediaId, playRate: rate, audioOutput: true }, CALL_TIMEOUT_MS, () => true);
+    if (!ok) {
+        console.warn('[webOSPlaybackRate] setPlayRate failed, playback may be muted');
     }
 }
 
-/**
- * Change the playback rate on webOS without losing the sound.
- * Resolves once the change is applied, or superseded by a newer one.
- */
-export function setWebOSPlaybackRate(element: HTMLMediaElement, rate: number): Promise<void> {
-    const requestId = (requestIds.get(element) ?? 0) + 1;
-    requestIds.set(element, requestId);
-    pendingRates.set(element, rate);
+async function run(element: HTMLMediaElement, state: State) {
+    state.running = true;
+    try {
+        while (state.pending && states.get(element) === state) {
+            state.pending = false;
+            await applyRate(element, state, state.rate);
+        }
+    } catch (err) {
+        console.error('[webOSPlaybackRate] failed to change the playback rate', err);
+    } finally {
+        state.running = false;
+    }
+}
 
-    const run = () => applyRate(element, rate, requestId).finally(() => {
-        if (requestIds.get(element) === requestId) pendingRates.delete(element);
-    });
-    const next = (queues.get(element) ?? Promise.resolve()).then(run, run);
-    queues.set(element, next.catch(() => { /* already logged */ }));
-    return next;
+/** Change the playback rate on webOS without losing the sound. Only the latest of several quick changes is applied. */
+export function setWebOSPlaybackRate(element: HTMLMediaElement, rate: number) {
+    let state = states.get(element);
+    if (!state) {
+        state = { rate, pending: false, running: false };
+        states.set(element, state);
+    }
+    state.rate = rate;
+    state.pending = true;
+    if (!state.running) void run(element, state);
+}
+
+/** Drop any change still being applied, e.g. when playback stops */
+export function cancelWebOSPlaybackRate(element: HTMLMediaElement) {
+    states.delete(element);
 }
 
 /** The rate of a change still being applied to this element, if any */
 export function getWebOSPlaybackRate(element: HTMLMediaElement): number | undefined {
-    return pendingRates.get(element);
+    const state = states.get(element);
+    return state && (state.pending || state.running) ? state.rate : undefined;
 }
